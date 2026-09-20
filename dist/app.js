@@ -1,3 +1,4 @@
+import { createInk, drawInkIntoPDF } from './ink.js';
 import { removeWhiteBackground } from './background.js';
 import * as pdfjs from './vendor/pdf.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.mjs', import.meta.url).href;
@@ -5,14 +6,17 @@ const $ = id => document.getElementById(id);
 let sourceCanvas;
 let pdf, original, filename, pageNumber = 1, viewport, source, selected = null, stamps = [], busy = false, renderTask, noticeTimer;
 const notify = (message, error = false) => { $('status').textContent = message; $('status').className = 'visible' + (error ? ' error' : ''); clearTimeout(noticeTimer); noticeTimer = setTimeout(() => $('status').className = '', error ? 10000 : 4500); };
+let ink;
 function sync() {
+  if(ink?.active) return;
+  ink?.sync();
   $('prev').disabled = busy || !pdf || pageNumber <= 1; $('next').disabled = busy || !pdf || pageNumber >= pdf.numPages;
-  $('add').disabled = busy || !pdf || !source; $('download').disabled = busy || !pdf || !stamps.length;
+  $('add').disabled = busy || !pdf || !source; $('download').disabled = busy || !pdf || !(stamps.length || ink?.strokes.length);
   $('remove-background').disabled = busy || !source; $('background-strength').disabled = busy || !source || !$('remove-background').checked;
   $('pdf-input').disabled = busy; $('image-input').disabled = busy;
   const s = stamps.find(s => s.id === selected); $('size').disabled = busy || !s; $('remove').disabled = busy || !s;
   $('size-value').value = s ? Math.round(s.w * 100) + '%' : '—'; if (s) $('size').value = s.w * 100;
-  $('count').textContent = stamps.length ? `${stamps.length} 個簽名` : '尚未加入簽名'; $('page-label').textContent = pdf ? `${pageNumber} / ${pdf.numPages}` : '— / —';
+  $('count').textContent = (stamps.length || ink?.strokes.length) ? `${stamps.length} 個簽名・${ink?.strokes.length || 0} 筆畫記` : '尚未加入簽名或畫記'; $('page-label').textContent = pdf ? `${pageNumber} / ${pdf.numPages}` : '— / —';
 }
 function constrain(s) { s.w = Math.max(.03, Math.min(s.w, .98, .98 * viewport.height / (viewport.width * s.ratio))); s.h = s.w * viewport.width / viewport.height * s.ratio; s.x = Math.max(0, Math.min(s.x, 1 - s.w)); s.y = Math.max(0, Math.min(s.y, 1 - s.h)); }
 function styleStamp(el, s) { Object.assign(el.style, {left:s.x*100+'%', top:s.y*100+'%', width:s.w*100+'%', height:s.h*100+'%'}); el.classList.toggle('selected', s.id === selected); }
@@ -40,14 +44,14 @@ async function renderPage() {
     const available=Math.max(160,$('viewport').clientWidth-(innerWidth<760?32:72));const width=Math.min(viewport.width,available);const scale=width/viewport.width;
     const vp=p.getViewport({scale:scale*Math.min(devicePixelRatio||1,2)});const canvas=$('canvas');canvas.width=Math.ceil(vp.width);canvas.height=Math.ceil(vp.height);
     $('page').style.width=width+'px';$('page').style.height=width*viewport.height/viewport.width+'px';$('page').hidden=false;$('empty').hidden=true;
-    renderTask=p.render({canvasContext:canvas.getContext('2d'),viewport:vp});await renderTask.promise;drawStamps();
+    renderTask=p.render({canvasContext:canvas.getContext('2d'),viewport:vp});await renderTask.promise;drawStamps();ink.render();
   }catch(e){notify('這一頁無法顯示，請嘗試其他頁面或另一份 PDF。',true);console.error(e);}finally{busy=false;sync();}
 }
 async function loadPDF(file) {
   if(!file||busy)return;if(!/\.pdf$/i.test(file.name)&&file.type!=='application/pdf'){notify('請選擇 PDF 格式的文件。',true);return;}
   busy=true;sync();notify('正在讀取 PDF…');let next;
   try {const bytes=new Uint8Array(await file.arrayBuffer());await PDFLib.PDFDocument.load(bytes);next=await pdfjs.getDocument({data:bytes.slice(),isEvalSupported:false}).promise;
-    await next.getPage(1);if(pdf)await pdf.destroy();pdf=next;original=bytes;filename=file.name;pageNumber=1;stamps=[];selected=null;
+    await next.getPage(1);if(pdf)await pdf.destroy();pdf=next;original=bytes;filename=file.name;pageNumber=1;stamps=[];selected=null;ink.reset();
     $('doc-title').textContent=filename;$('file-info').hidden=false;$('file-info').textContent=`${filename} · ${pdf.numPages} 頁`;
     await renderPage();notify('PDF 已就緒，請上傳簽名圖片。');
   }catch(e){if(next&&next!==pdf)await next.destroy();notify(/encrypt|password/i.test(String(e))?'這份 PDF 有密碼保護，請先解除密碼後再上傳。':'無法讀取這份 PDF，請確認檔案完整且格式正確。',true);console.error(e);}finally{busy=false;$('pdf-input').value='';sync();}
@@ -78,10 +82,11 @@ $('add').onclick=addSignature;
 function remove(){stamps=stamps.filter(s=>s.id!==selected);selected=null;drawStamps();} $('remove').onclick=remove;
 $('size').oninput=e=>{const s=stamps.find(s=>s.id===selected);if(s){s.w=Number(e.target.value)/100;constrain(s);drawStamps();}};
 $('overlay').onpointerdown=e=>{if(e.target===$('overlay')){selected=null;drawStamps();}};
-async function navigate(n){if(busy||!pdf||!Number.isInteger(n)||n<1||n>pdf.numPages)throw Error('無效頁碼或文件忙碌中');pageNumber=n;selected=null;await renderPage();return{page:pageNumber,total:pdf.numPages};}
+async function navigate(n){if(busy||ink.active||!pdf||!Number.isInteger(n)||n<1||n>pdf.numPages)throw Error('無效頁碼或文件忙碌中');pageNumber=n;selected=null;await renderPage();return{page:pageNumber,total:pdf.numPages};}
 $('prev').onclick=()=>navigate(pageNumber-1);$('next').onclick=()=>navigate(pageNumber+1);
-export async function createSignedPDF(bytes, items, getViewport){const doc=await PDFLib.PDFDocument.load(bytes);const cache=new Map();for(const s of items){let image=cache.get(s.data);if(!image){image=await doc.embedPng(s.data);cache.set(s.data,image);}const v=await getViewport(s.page);const x=s.x*v.width,y=s.y*v.height,w=s.w*v.width,h=s.h*v.height;const origin=v.convertToPdfPoint(x,y+h),right=v.convertToPdfPoint(x+w,y+h),top=v.convertToPdfPoint(x,y);doc.getPage(s.page-1).drawImage(image,{x:origin[0],y:origin[1],width:Math.hypot(right[0]-origin[0],right[1]-origin[1]),height:Math.hypot(top[0]-origin[0],top[1]-origin[1]),rotate:PDFLib.degrees(Math.atan2(right[1]-origin[1],right[0]-origin[0])*180/Math.PI)});}return doc.save();}
-$('download').onclick=async()=>{if(busy||!stamps.length)return;busy=true;sync();$('download').textContent='正在儲存…';try{const bytes=await createSignedPDF(original,stamps,async n=>(await pdf.getPage(n)).getViewport({scale:1}));const url=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));const a=document.createElement('a');a.href=url;a.download=filename.replace(/\.pdf$/i,'')+'_已簽名.pdf';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);notify('已產生簽名 PDF，下載已開始。');}catch(e){notify('儲存失敗，請重試或換一份 PDF。',true);console.error(e);}finally{busy=false;$('download').textContent='下載已簽名 PDF ↓';sync();}};
-let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(pdf&&!busy)renderPage();},200);});
+export async function createSignedPDF(bytes, items, getViewport, strokes = []){const doc=await PDFLib.PDFDocument.load(bytes);const cache=new Map();for(const s of items){let image=cache.get(s.data);if(!image){image=await doc.embedPng(s.data);cache.set(s.data,image);}const v=await getViewport(s.page);const x=s.x*v.width,y=s.y*v.height,w=s.w*v.width,h=s.h*v.height;const origin=v.convertToPdfPoint(x,y+h),right=v.convertToPdfPoint(x+w,y+h),top=v.convertToPdfPoint(x,y);doc.getPage(s.page-1).drawImage(image,{x:origin[0],y:origin[1],width:Math.hypot(right[0]-origin[0],right[1]-origin[1]),height:Math.hypot(top[0]-origin[0],top[1]-origin[1]),rotate:PDFLib.degrees(Math.atan2(right[1]-origin[1],right[0]-origin[0])*180/Math.PI)});}await drawInkIntoPDF(doc,strokes,getViewport,PDFLib);return doc.save();}
+$('download').onclick=async()=>{if(busy||ink.active||!(stamps.length||ink.strokes.length))return;busy=true;sync();$('download').textContent='正在儲存…';try{const bytes=await createSignedPDF(original,stamps,async n=>(await pdf.getPage(n)).getViewport({scale:1}),ink.strokes);const url=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));const a=document.createElement('a');a.href=url;a.download=filename.replace(/\.pdf$/i,'')+'_已簽名.pdf';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);notify('已產生包含簽名與筆跡的 PDF，下載已開始。');}catch(e){notify('儲存失敗，請重試或換一份 PDF。',true);console.error(e);}finally{busy=false;$('download').textContent='下載完成的 PDF ↓';sync();}};
+ink=createInk({getPage:()=>pageNumber,getViewport:()=>pdf?viewport:null,isBusy:()=>busy,onChange:()=>{if(ink.active){$('prev').disabled=true;$('next').disabled=true;$('download').disabled=true;$('pdf-input').disabled=true;$('image-input').disabled=true;}else sync();}});
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(pdf&&!busy&&!ink.active)renderPage();},200);});
 if(document.modelContext?.registerTool){try{Promise.resolve(document.modelContext.registerTool({name:'navigate_pdf_page',description:'切換已載入 PDF 的預覽頁面。',inputSchema:{type:'object',properties:{page:{type:'integer',minimum:1}},required:['page'],additionalProperties:false},annotations:{readOnlyHint:false},execute:input=>navigate(input.page)})).catch(console.warn);}catch(e){console.warn(e);}}
 sync();
