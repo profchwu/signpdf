@@ -1,0 +1,22 @@
+Third-party notices for 簽名PDF
+
+This website distributes the following third-party libraries. Their original
+source notices are preserved. Full license texts are included in licenses/.
+
+pdf-lib 1.17.1
+Copyright (c) 2019 Andrew Dillon
+MIT — licenses/pdf-lib-MIT.txt
+https://github.com/Hopding/pdf-lib/tree/v1.17.1
+
+PDF.js / pdfjs-dist 4.10.38
+Copyright 2024 Mozilla Foundation
+Apache-2.0 — licenses/pdfjs-Apache-2.0.txt
+https://github.com/mozilla/pdf.js/tree/v4.10.38
+
+pdf-lib bundled dependencies:
+@pdf-lib/standard-fonts 1.0.0 — licenses/standard-fonts-MIT.txt
+@pdf-lib/upng 1.0.1 — licenses/upng-MIT.txt
+pako 1.0.11 — licenses/pako-LICENSE.txt
+tslib 1.11.1 — licenses/tslib-LICENSE.txt
+
+These notices do not grant a new license to the application's own code.
