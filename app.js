@@ -1,11 +1,14 @@
+import { removeWhiteBackground } from './background.js';
 import * as pdfjs from './vendor/pdf.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.mjs', import.meta.url).href;
 const $ = id => document.getElementById(id);
+let sourceCanvas;
 let pdf, original, filename, pageNumber = 1, viewport, source, selected = null, stamps = [], busy = false, renderTask, noticeTimer;
 const notify = (message, error = false) => { $('status').textContent = message; $('status').className = 'visible' + (error ? ' error' : ''); clearTimeout(noticeTimer); noticeTimer = setTimeout(() => $('status').className = '', error ? 10000 : 4500); };
 function sync() {
   $('prev').disabled = busy || !pdf || pageNumber <= 1; $('next').disabled = busy || !pdf || pageNumber >= pdf.numPages;
   $('add').disabled = busy || !pdf || !source; $('download').disabled = busy || !pdf || !stamps.length;
+  $('remove-background').disabled = busy || !source; $('background-strength').disabled = busy || !source || !$('remove-background').checked;
   $('pdf-input').disabled = busy; $('image-input').disabled = busy;
   const s = stamps.find(s => s.id === selected); $('size').disabled = busy || !s; $('remove').disabled = busy || !s;
   $('size-value').value = s ? Math.round(s.w * 100) + '%' : '—'; if (s) $('size').value = s.w * 100;
@@ -53,8 +56,23 @@ $('pdf-input').onchange=e=>loadPDF(e.target.files[0]);
 ['dragenter','dragover'].forEach(name=>$('drop').addEventListener(name,e=>{e.preventDefault();$('drop').classList.add('drag');}));
 ['dragleave','drop'].forEach(name=>$('drop').addEventListener(name,e=>{e.preventDefault();$('drop').classList.remove('drag');}));$('drop').addEventListener('drop',e=>loadPDF(e.dataTransfer.files[0]));
 $('image-input').onchange=async e=>{const file=e.target.files[0];if(!file||busy)return;busy=true;sync();let url;
-  try{if(!['image/png','image/jpeg','image/webp'].includes(file.type))throw Error('format');url=URL.createObjectURL(file);const img=new Image();img.src=url;await img.decode();if(!img.naturalWidth||!img.naturalHeight)throw Error('image');const c=document.createElement('canvas');const scale=Math.min(1,2400/Math.max(img.naturalWidth,img.naturalHeight));c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));c.getContext('2d').drawImage(img,0,0,c.width,c.height);source={data:c.toDataURL('image/png'),ratio:c.height/c.width};$('source-image').src=source.data;$('signature-preview').hidden=false;busy=false;if(pdf)addSignature();else notify('簽名圖片已就緒，請上傳 PDF。');
+  try{if(!['image/png','image/jpeg','image/webp'].includes(file.type))throw Error('format');url=URL.createObjectURL(file);const img=new Image();img.src=url;await img.decode();if(!img.naturalWidth||!img.naturalHeight)throw Error('image');const c=document.createElement('canvas');const scale=Math.min(1,2400/Math.max(img.naturalWidth,img.naturalHeight));c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));c.getContext('2d').drawImage(img,0,0,c.width,c.height);sourceCanvas=c;source={assetId:crypto.randomUUID(),ratio:c.height/c.width};updateBackground();$('signature-preview').hidden=false;busy=false;if(pdf)addSignature();else notify('簽名圖片已就緒，請上傳 PDF。');
   }catch(err){notify('無法讀取圖片，請使用 PNG、JPG 或 WebP。',true);}finally{if(url)URL.revokeObjectURL(url);e.target.value='';busy=false;sync();}};
+function updateBackground() {
+  if (!sourceCanvas || !source) return;
+  const c=document.createElement('canvas'); c.width=sourceCanvas.width; c.height=sourceCanvas.height;
+  const ctx=c.getContext('2d');ctx.drawImage(sourceCanvas,0,0);
+  const strength=Number($('background-strength').value);$('background-value').value=String(strength);
+  if ($('remove-background').checked) {
+    const pixels=ctx.getImageData(0,0,c.width,c.height);
+    removeWhiteBackground(pixels.data,strength);ctx.putImageData(pixels,0,0);
+  }
+  source.data=c.toDataURL('image/png');$('source-image').src=source.data;
+  stamps.forEach(s=>{if(s.assetId===source.assetId)s.data=source.data;});
+  drawStamps();
+}
+$('remove-background').onchange=()=>{if(!busy)updateBackground();};
+$('background-strength').oninput=()=>{if(!busy)updateBackground();};
 function addSignature(){if(busy||!pdf||!source)return;const s={...source,id:crypto.randomUUID(),page:pageNumber,x:.35,y:.4,w:.28};constrain(s);stamps.push(s);selected=s.id;drawStamps();notify('簽名已加入，可以拖曳移動與縮放。');}
 $('add').onclick=addSignature;
 function remove(){stamps=stamps.filter(s=>s.id!==selected);selected=null;drawStamps();} $('remove').onclick=remove;
